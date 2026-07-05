@@ -19,7 +19,7 @@ python-multipart
 
 # UI
 streamlit
-
+matplotlib
 # Monitoring
 evidently
 
