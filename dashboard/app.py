@@ -2,7 +2,6 @@ import matplotlib
 matplotlib.use('Agg')
 
 import os
-import sys
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -27,27 +26,54 @@ MODEL_DIR = Path("models")
 @st.cache_resource(show_spinner=False)
 def load_models():
     models = {}
-    model_files = {
-        "eta_rf":           MODEL_DIR / "eta_rf.joblib",
-        "eta_lr":           MODEL_DIR / "eta_lr.joblib",
-        "eta_quantile":     MODEL_DIR / "eta_quantile.joblib",
-        "eta_gbr":          MODEL_DIR / "eta_gbr.joblib",
-        "feature_pipeline": MODEL_DIR / "feature_pipeline.joblib",
-        "pricing_config":   MODEL_DIR / "pricing_config.joblib",
-        "maintenance_rf":   MODEL_DIR / "maintenance_rf.joblib",
-        "maintenance_aps":  MODEL_DIR / "maintenance_aps.joblib",
-        "maintenance_iso":  MODEL_DIR / "maintenance_iso.joblib",
-        "nlp_pipeline":     MODEL_DIR / "nlp_pipeline.joblib",
-    }
     errors = []
-    for name, path in model_files.items():
+    model_files = [
+        "eta_rf", "eta_lr", "eta_quantile", "eta_gbr",
+        "feature_pipeline", "pricing_config",
+        "maintenance_rf", "maintenance_aps", "maintenance_iso",
+        "nlp_pipeline"
+    ]
+    for name in model_files:
         try:
-            models[name] = joblib.load(path)
+            models[name] = joblib.load(MODEL_DIR / f"{name}.joblib")
         except Exception as e:
             errors.append(f"{name}: {e}")
     return models, errors
 
 models, load_errors = load_models()
+
+# ── Helper: run feature pipeline ─────────────────────────────────────────────
+def run_feature_pipeline(raw_df, fp):
+    """
+    Manually apply the feature_pipeline dict to a raw input DataFrame.
+    fp keys: features, target, global_mean, pu_enc, do_enc, borough_enc, route_enc
+    """
+    df = raw_df.copy()
+
+    # Zone encodings
+    pu_enc      = fp.get("pu_enc", {})
+    do_enc      = fp.get("do_enc", {})
+    borough_enc = fp.get("borough_enc", {})
+    route_enc   = fp.get("route_enc", {})
+    global_mean = fp.get("global_mean", 15.0)
+
+    df["pu_zone_enc"]      = df["pickup_zone"].map(pu_enc).fillna(global_mean)
+    df["do_zone_enc"]      = df["dropoff_zone"].map(do_enc).fillna(global_mean)
+    df["pickup_borough_enc"]  = df["pickup_borough"].map(borough_enc).fillna(0)
+    df["dropoff_borough_enc"] = df["dropoff_borough"].map(borough_enc).fillna(0)
+    df["route_enc"]        = (df["pickup_zone"] + "_" + df["dropoff_zone"]).map(route_enc).fillna(global_mean)
+    df["pickup_hour_int"]  = df["order_hour"]
+
+    # Select final features
+    feature_cols = fp.get("features", [
+        "trip_distance", "route_enc", "pu_zone_enc", "pickup_hour_int",
+        "is_rush_hour", "rain_x_dist", "wind_x_dist", "temp",
+        "day_of_week", "month", "prcp", "wspd", "snow"
+    ])
+    # Keep only columns that exist
+    available = [c for c in feature_cols if c in df.columns]
+    return df[available]
+
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("🚕 Mobility ML Suite")
@@ -58,10 +84,8 @@ page = st.sidebar.radio("Navigate", [
     "📈 EDA Summary",
 ])
 st.sidebar.markdown("---")
-
 st.sidebar.markdown("**Model Status**")
-key_models = ["eta_rf", "maintenance_rf", "nlp_pipeline"]
-for m in key_models:
+for m in ["eta_rf", "maintenance_rf", "nlp_pipeline"]:
     icon = "🟢" if m in models else "🔴"
     st.sidebar.markdown(f"{icon} {m}")
 
@@ -100,7 +124,7 @@ if page == "📊 ETA & Pricing":
 
     if st.button("🚀 Get Quote", type="primary"):
         if "eta_rf" not in models or "feature_pipeline" not in models:
-            st.error("❌ ETA models not found. Make sure models/ folder is in your repo.")
+            st.error("❌ ETA models not found.")
         else:
             try:
                 is_rush     = 1 if order_hour in range(7,10) or order_hour in range(17,20) else 0
@@ -125,28 +149,34 @@ if page == "📊 ETA & Pricing":
                     "wind_x_dist":    wind_x_dist,
                 }])
 
-                X       = models["feature_pipeline"].transform(raw)
-                eta_p50 = float(models["eta_rf"].predict(X)[0])
+                fp = models["feature_pipeline"]
+                X  = run_feature_pipeline(raw, fp)
 
-                if "eta_quantile" in models:
-                    try:
-                        bounds  = models["eta_quantile"].predict(X)
-                        eta_p10 = float(bounds[0][0]) if hasattr(bounds[0],'__len__') else eta_p50*0.8
-                        eta_p90 = float(bounds[0][1]) if hasattr(bounds[0],'__len__') else eta_p50*1.3
-                    except Exception:
-                        eta_p10, eta_p90 = eta_p50*0.8, eta_p50*1.3
-                else:
+                # eta_rf is a dict with 'model' key
+                eta_p50 = float(models["eta_rf"]["model"].predict(X)[0])
+
+                # Quantile bounds
+                try:
+                    q_dict  = models["eta_quantile"]
+                    q_models = q_dict["models"]  # list of [p10_model, p90_model]
+                    scaler  = q_dict.get("scaler")
+                    Xs = scaler.transform(X) if scaler else X
+                    eta_p10 = float(q_models[0].predict(Xs)[0])
+                    eta_p90 = float(q_models[-1].predict(Xs)[0])
+                except Exception:
                     eta_p10, eta_p90 = eta_p50*0.8, eta_p50*1.3
 
+                # Pricing
                 try:
                     cfg        = models["pricing_config"]
-                    base_rate  = float(cfg.get("base_rate_per_km", 2.5))
-                    base_fare  = float(cfg.get("base_fare", 3.0))
-                    surge_rush = float(cfg.get("surge_rush", 1.3))
-                    surge_rain = float(cfg.get("surge_rain", 1.15))
-                    surge_snow = float(cfg.get("surge_snow", 1.25))
+                    sc         = cfg.get("surge_config", {})
+                    base_rate  = float(cfg.get("base_rate", 2.5))
+                    base_min   = float(cfg.get("base_minimum", 3.0))
+                    surge_rush = float(sc.get("rush_hour", 1.3))
+                    surge_rain = float(sc.get("rain", 1.15))
+                    surge_snow = float(sc.get("snow", 1.25))
                 except Exception:
-                    base_rate, base_fare = 2.5, 3.0
+                    base_rate, base_min = 2.5, 3.0
                     surge_rush, surge_rain, surge_snow = 1.3, 1.15, 1.25
 
                 surge = 1.0
@@ -154,7 +184,7 @@ if page == "📊 ETA & Pricing":
                 if prcp > 2.0: surge *= surge_rain
                 if snow > 5.0: surge *= surge_snow
                 surge = round(min(surge, 2.5), 2)
-                price = round((base_fare + base_rate * trip_distance) * surge, 2)
+                price = round(max(base_min, base_rate * trip_distance) * surge, 2)
 
                 st.success("✅ Quote generated!")
                 c1,c2,c3,c4 = st.columns(4)
@@ -204,7 +234,19 @@ elif page == "🔧 Maintenance Risk":
             st.error("❌ Maintenance model not found.")
         else:
             try:
-                features = pd.DataFrame([{
+                mrf     = models["maintenance_rf"]
+                model   = mrf["model"]
+                scaler  = mrf.get("scaler")
+                feats   = mrf.get("features", [
+                    "odometer_km","avg_speed_kmh","max_speed_kmh",
+                    "engine_temp_mean_c","engine_temp_max_c",
+                    "battery_voltage_mean","battery_voltage_min",
+                    "vibration_mean_ms2","vibration_max_ms2",
+                    "brake_pressure_mean","hard_brakes_count",
+                    "idle_hours","trips_count"
+                ])
+
+                raw = pd.DataFrame([{
                     "odometer_km":          odometer_km,
                     "avg_speed_kmh":        avg_speed_kmh,
                     "max_speed_kmh":        max_speed_kmh,
@@ -220,12 +262,25 @@ elif page == "🔧 Maintenance Risk":
                     "trips_count":          int(trips_count),
                 }])
 
-                fail_prob  = float(models["maintenance_rf"].predict_proba(features)[0][1])
-                iso_score  = 0.0
+                available = [c for c in feats if c in raw.columns]
+                X = raw[available]
+                if scaler:
+                    X = scaler.transform(X)
+
+                fail_prob  = float(model.predict_proba(X)[0][1])
+
+                # Isolation Forest anomaly score
+                iso_score = 0.0
                 if "maintenance_iso" in models:
                     try:
-                        iso_score = float(-models["maintenance_iso"].decision_function(features)[0])
-                        iso_score = max(0.0, min(1.0, (iso_score + 0.5)))
+                        iso     = models["maintenance_iso"]
+                        iso_m   = iso["model"]
+                        iso_s   = iso.get("scaler")
+                        iso_f   = iso.get("features", available)
+                        Xi      = raw[[c for c in iso_f if c in raw.columns]]
+                        if iso_s: Xi = iso_s.transform(Xi)
+                        iso_score = float(-iso_m.decision_function(Xi)[0])
+                        iso_score = max(0.0, min(1.0, iso_score + 0.5))
                     except Exception:
                         iso_score = 0.0
 
@@ -285,14 +340,17 @@ elif page == "💬 NLP Triage":
             st.error("❌ NLP model not found.")
         else:
             try:
-                pipeline  = models["nlp_pipeline"]
-                predicted = pipeline.predict([text])[0]
-                proba     = pipeline.predict_proba([text])[0]
-                classes   = pipeline.classes_
-                confidence= float(proba.max())
-                icon      = CATEGORY_ICONS.get(predicted,"")
+                nlp_dict  = models["nlp_pipeline"]
+                pipeline  = nlp_dict["pipeline"]
+                labels    = nlp_dict.get("label_names", None)
 
-                st.success(f"{icon} **{predicted.upper()}** (confidence: {confidence*100:.1f}%)")
+                predicted  = pipeline.predict([text])[0]
+                proba      = pipeline.predict_proba([text])[0]
+                classes    = labels if labels is not None else pipeline.classes_
+                confidence = float(proba.max())
+                icon       = CATEGORY_ICONS.get(str(predicted), "")
+
+                st.success(f"{icon} **{str(predicted).upper()}** (confidence: {confidence*100:.1f}%)")
 
                 scores_df = pd.DataFrame({
                     "category":   classes,
