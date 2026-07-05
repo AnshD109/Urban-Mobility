@@ -28,4 +28,4 @@ python-dotenv
 pydantic
 tiktoken
 numpy
-pandas
+pandas"lightgbm" 
