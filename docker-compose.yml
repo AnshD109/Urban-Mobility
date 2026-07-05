@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  eta_service:
+    build:
+      context: .
+      dockerfile: services/eta_service/Dockerfile
+    container_name: eta_service
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./data/processed:/app/data/processed:ro
+    environment:
+      - MODEL_DIR=/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  maintenance_service:
+    build:
+      context: .
+      dockerfile: services/maintenance_service/Dockerfile
+    container_name: maintenance_service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./models:/app/models:ro
+    environment:
+      - MODEL_DIR=/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  nlp_service:
+    build:
+      context: .
+      dockerfile: services/nlp_service/Dockerfile
+    container_name: nlp_service
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./models:/app/models:ro
+    environment:
+      - MODEL_DIR=/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - ETA_SERVICE_URL=http://eta_service:8000
+      - MAINTENANCE_SERVICE_URL=http://maintenance_service:8001
+      - NLP_SERVICE_URL=http://nlp_service:8002
+    depends_on:
+      - eta_service
+      - maintenance_service
+      - nlp_service
