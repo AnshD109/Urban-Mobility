@@ -45,34 +45,52 @@ models, load_errors = load_models()
 # ── Helper: run feature pipeline ─────────────────────────────────────────────
 def run_feature_pipeline(raw_df, fp):
     """
-    Manually apply the feature_pipeline dict to a raw input DataFrame.
-    fp keys: features, target, global_mean, pu_enc, do_enc, borough_enc, route_enc
+    Generates all 19 features the RandomForestRegressor expects:
+    trip_distance, hour_sin, hour_cos, dow_sin, dow_cos, month,
+    is_weekend, is_rush_hour, temp, prcp, wspd, is_rainy, is_windy,
+    rain_x_dist, wind_x_dist, pu_zone_enc, do_zone_enc, pu_borough_enc, route_enc
     """
     df = raw_df.copy()
 
-    # Zone encodings
+    # Encodings from feature_pipeline dict
     pu_enc      = fp.get("pu_enc", {})
     do_enc      = fp.get("do_enc", {})
     borough_enc = fp.get("borough_enc", {})
     route_enc   = fp.get("route_enc", {})
     global_mean = fp.get("global_mean", 15.0)
 
-    df["pu_zone_enc"]      = df["pickup_zone"].map(pu_enc).fillna(global_mean)
-    df["do_zone_enc"]      = df["dropoff_zone"].map(do_enc).fillna(global_mean)
-    df["pickup_borough_enc"]  = df["pickup_borough"].map(borough_enc).fillna(0)
-    df["dropoff_borough_enc"] = df["dropoff_borough"].map(borough_enc).fillna(0)
-    df["route_enc"]        = (df["pickup_zone"] + "_" + df["dropoff_zone"]).map(route_enc).fillna(global_mean)
-    df["pickup_hour_int"]  = df["order_hour"]
+    df["pu_zone_enc"]    = df["pickup_zone"].map(pu_enc).fillna(global_mean)
+    df["do_zone_enc"]    = df["dropoff_zone"].map(do_enc).fillna(global_mean)
+    df["pu_borough_enc"] = df["pickup_borough"].map(borough_enc).fillna(0)
+    df["route_enc"]      = (df["pickup_zone"] + "_" + df["dropoff_zone"]).map(route_enc).fillna(global_mean)
 
-    # Select final features
-    feature_cols = fp.get("features", [
-        "trip_distance", "route_enc", "pu_zone_enc", "pickup_hour_int",
-        "is_rush_hour", "rain_x_dist", "wind_x_dist", "temp",
-        "day_of_week", "month", "prcp", "wspd", "snow"
-    ])
-    # Keep only columns that exist
-    available = [c for c in feature_cols if c in df.columns]
-    return df[available]
+    # Cyclical time encodings
+    hour = df["order_hour"]
+    dow  = df["day_of_week"]
+    df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+    df["dow_sin"]  = np.sin(2 * np.pi * dow  / 7)
+    df["dow_cos"]  = np.cos(2 * np.pi * dow  / 7)
+
+    # Binary flags
+    df["is_weekend"]   = (df["day_of_week"] >= 5).astype(int)
+    df["is_rush_hour"] = df["order_hour"].apply(
+        lambda h: 1 if h in range(7,10) or h in range(17,20) else 0)
+    df["is_rainy"]  = (df["prcp"] > 2.0).astype(int)
+    df["is_windy"]  = (df["wspd"] > 10.0).astype(int)
+
+    # Interaction features
+    df["rain_x_dist"] = df["prcp"] * df["trip_distance"]
+    df["wind_x_dist"] = df["wspd"] * df["trip_distance"]
+
+    # Return exactly 19 features in correct order
+    feature_cols = [
+        "trip_distance", "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+        "month", "is_weekend", "is_rush_hour", "temp", "prcp", "wspd",
+        "is_rainy", "is_windy", "rain_x_dist", "wind_x_dist",
+        "pu_zone_enc", "do_zone_enc", "pu_borough_enc", "route_enc"
+    ]
+    return df[feature_cols]
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
