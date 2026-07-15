@@ -29,4 +29,3 @@ pydantic
 tiktoken
 numpy
 pandas
-lightgbm
